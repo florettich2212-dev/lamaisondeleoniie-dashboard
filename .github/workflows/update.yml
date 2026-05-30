@@ -42,9 +42,9 @@ jobs:
         run: |
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name  "github-actions[bot]"
+          git pull --rebase origin main
           git add history.json posts_cache.json stories_cache.json
           git diff --staged --quiet || git commit -m "cache: $(date -u '+%Y-%m-%d %H:%M UTC')"
-          git pull --rebase origin main
           git push
 
       - name: Prepare Pages artifact
