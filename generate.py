@@ -309,6 +309,9 @@ def fetch_live(env):
         next_max_id = feed['next_max_id']
 
     print(f'  Got {len(all_items)} posts')
+    if not all_items:
+        print('  No posts fetched — falling back to cache.')
+        return None
 
     # media_type: 1=IMAGE, 2=VIDEO/REEL, 8=CAROUSEL_ALBUM
     def _mtype(item):
@@ -427,6 +430,103 @@ def fetch_live(env):
 
 
 # ── Mock data ─────────────────────────────────────────────────────────────────
+
+FULL_POSTS_CACHE_PATH = Path(__file__).parent / 'full_posts_cache.json'
+
+
+def build_from_cache():
+    """Render dashboard entirely from local cache files — no API needed."""
+    print('  Building dashboard from cached data…')
+
+    # Load full posts (metadata + metrics)
+    full_posts = []
+    if FULL_POSTS_CACHE_PATH.exists():
+        try:
+            full_posts = json.loads(FULL_POSTS_CACHE_PATH.read_text())
+        except Exception:
+            full_posts = []
+
+    # Merge with fresh metrics cache where available
+    metrics = {}
+    if POSTS_CACHE_PATH.exists():
+        try:
+            metrics = json.loads(POSTS_CACHE_PATH.read_text())
+        except Exception:
+            metrics = {}
+
+    # Follower history
+    daily_total, daily_net = fetch_follower_history()
+    w_labels, w_total, w_net, m_labels, m_total, m_net = aggregate_follower_series(daily_total, daily_net)
+
+    follower_now  = max(daily_total.values()) if daily_total else 0
+    follower_gain = sum(v for k, v in daily_net.items()
+                        if k >= (datetime.now(timezone.utc) - timedelta(days=30)).strftime('%Y-%m-%d'))
+
+    posts = []
+    for p in full_posts:
+        mid = p['id']
+        c   = metrics.get(mid, {})
+        likes    = c.get('likes',    p.get('likes', 0))
+        comments = c.get('comments', p.get('comments', 0))
+        saved    = c.get('saved',    p.get('saved', 0))
+        reach    = c.get('reach',    p.get('reach', 0))
+        views    = c.get('views',    p.get('impressions', 0))
+        shares   = c.get('shares',   p.get('shares', 0))
+        follows  = c.get('follows',  p.get('followers'))
+        eng_rate = round((likes + comments + saved) / max(follower_now, 1) * 100, 2)
+        posts.append({
+            'id':          mid,
+            'type':        p.get('type', 'IMAGE'),
+            'date':        p.get('date', ''),
+            'caption':     p.get('caption', ''),
+            'likes':       likes,
+            'comments':    comments,
+            'saved':       saved,
+            'reach':       reach,
+            'impressions': views,
+            'video_views': views,
+            'eng_rate':    eng_rate,
+            'followers':   follows,
+            'shares':      shares,
+            'thumbnail':   p.get('thumbnail', ''),
+            'permalink':   p.get('permalink', ''),
+        })
+
+    # Stories
+    stories_cache = {}
+    if STORIES_CACHE_PATH.exists():
+        try:
+            stories_cache = json.loads(STORIES_CACHE_PATH.read_text())
+        except Exception:
+            stories_cache = {}
+    stories = sorted(stories_cache.values(), key=lambda x: x.get('date') or '', reverse=True)
+
+    avg_eng = round(sum(p['eng_rate'] for p in posts[:20]) / max(len(posts[:20]), 1), 2) if posts else 0
+    weekly_freq, monthly_freq = post_frequency(posts)
+    print(f'  Posts: {len(posts)}, Stories: {len(stories)}, Followers: {follower_now}')
+
+    return {
+        'generated':        datetime.now().strftime('%-d %b %Y %H:%M'),
+        'handle':           'lamaisondeleoniie',
+        'name':             'lamaisondeleoniie',
+        'biography':        '',
+        'followers':        follower_now,
+        'following':        0,
+        'media_count':      len(posts),
+        'follower_gain_30d': follower_gain,
+        'reach_30d':        0,
+        'avg_eng_rate':     avg_eng,
+        'reach_ts':         [],
+        'profile_views_ts': [],
+        'w_labels': w_labels, 'w_total': w_total, 'w_net': w_net,
+        'm_labels': m_labels, 'm_total': m_total, 'm_net': m_net,
+        'posts':            posts,
+        'stories':          stories,
+        'weekly_freq':      weekly_freq,
+        'monthly_freq':     monthly_freq,
+        'is_mock':          False,
+    }
+
 
 def build_mock():
     print('  No .env found — using mock data. Run auth.py to connect the live API.')
@@ -1528,8 +1628,10 @@ def main():
         print('  Session found — fetching live data…')
         data = fetch_live(env)
         if data is None:
-            print('  Live fetch failed — falling back to mock data.')
-            data = build_mock()
+            print('  Live fetch failed — using cached data.')
+            data = build_from_cache()
+    elif FULL_POSTS_CACHE_PATH.exists():
+        data = build_from_cache()
     else:
         data = build_mock()
 
