@@ -434,6 +434,48 @@ def fetch_live(env):
 FULL_POSTS_CACHE_PATH = Path(__file__).parent / 'full_posts_cache.json'
 
 
+def _refresh_thumbnails(posts):
+    """Refresh any expired Instagram CDN thumbnail URLs via public oEmbed API."""
+    import re as _re, time as _time
+    try:
+        import requests as _req
+    except ImportError:
+        return posts
+
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    need_refresh = []
+    for i, p in enumerate(posts):
+        thumb = p.get('thumbnail', '')
+        m = _re.search(r'oe=([0-9A-Fa-f]+)', thumb)
+        expired = not thumb or (m and int(m.group(1), 16) < now_ts + 86400)
+        if expired and p.get('permalink'):
+            need_refresh.append(i)
+
+    if not need_refresh:
+        return posts
+
+    print(f'  Refreshing {len(need_refresh)} expired thumbnails via oEmbed…')
+    sess = _req.Session()
+    sess.headers['User-Agent'] = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36'
+    refreshed = 0
+    for i in need_refresh:
+        try:
+            r = sess.get(f'https://www.instagram.com/api/v1/oembed/?url={posts[i]["permalink"]}&maxwidth=640', timeout=10)
+            if r.ok:
+                thumb = r.json().get('thumbnail_url', '')
+                if thumb:
+                    posts[i]['thumbnail'] = thumb
+                    refreshed += 1
+        except Exception:
+            pass
+        _time.sleep(0.4)
+
+    print(f'  Thumbnails refreshed: {refreshed}/{len(need_refresh)}')
+    if refreshed:
+        FULL_POSTS_CACHE_PATH.write_text(json.dumps(posts))
+    return posts
+
+
 def build_from_cache():
     """Render dashboard entirely from local cache files — no API needed."""
     print('  Building dashboard from cached data…')
@@ -445,6 +487,8 @@ def build_from_cache():
             full_posts = json.loads(FULL_POSTS_CACHE_PATH.read_text())
         except Exception:
             full_posts = []
+
+    full_posts = _refresh_thumbnails(full_posts)
 
     # Merge with fresh metrics cache where available
     metrics = {}
