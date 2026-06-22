@@ -36,7 +36,7 @@ def load_env():
                 k, _, v = line.partition('=')
                 env[k.strip()] = v.strip()
     # Environment variables override (used by GitHub Actions)
-    for key in ('IG_ACCESS_TOKEN', 'IG_PAGE_TOKEN', 'IG_USER_ID', 'DASHBOARD_PASSWORD'):
+    for key in ('IG_SESSION_ID', 'IG_CSRF_TOKEN', 'IG_DS_USER_ID', 'IG_MID', 'IG_DID', 'DASHBOARD_PASSWORD'):
         if os.environ.get(key):
             env[key] = os.environ[key]
     return env
@@ -92,13 +92,8 @@ def days_ago(n):
     return int((datetime.now(timezone.utc) - timedelta(days=n)).timestamp())
 
 
-def fetch_follower_history(ig_id, token, today_count=None):
-    """Build follower history from history.json + live 30-day API data.
-    Pulls the last 30 days of daily deltas from the API, reconstructs
-    absolute counts anchored on today_count, saves them to history.json,
-    then derives net-new from consecutive-day diffs."""
-
-    # 1 — Load history.json
+def fetch_follower_history(today_count=None):
+    """Load follower history from history.json, optionally recording today's count."""
     history_json = {}
     daily_total = {}
     if HISTORY_PATH.exists():
@@ -109,39 +104,12 @@ def fetch_follower_history(ig_id, token, today_count=None):
             else:
                 daily_total[date_str] = int(entry)
 
-    # 2 — Pull last 30 days of delta data from the API
-    raw = api_get(f'/{ig_id}/insights', token, params={
-        'metric': 'follower_count', 'period': 'day',
-        'since': days_ago(30), 'until': days_ago(0),
-    })
-    api_deltas = {}
-    for item in raw.get('data', []):
-        for v in item.get('values', []):
-            api_deltas[v['end_time'][:10]] = v.get('value', 0)
-
-    # 3 — Reconstruct absolute counts from deltas, anchored on today's live count
-    if api_deltas and today_count:
+    if today_count:
         today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-        running = today_count
-        reconstructed = {today_str: today_count}
-        for date_str in sorted(api_deltas.keys(), reverse=True):
-            running -= api_deltas[date_str]
-            reconstructed[date_str] = running
+        history_json[today_str] = {'followers': today_count, 'source': 'instagrapi'}
+        daily_total[today_str] = today_count
+        HISTORY_PATH.write_text(json.dumps(history_json, indent=2, sort_keys=True))
 
-        # Save new / updated entries back to history.json
-        changed = False
-        for date_str, count in reconstructed.items():
-            existing = history_json.get(date_str, {})
-            src = existing.get('source', '') if isinstance(existing, dict) else ''
-            if src not in ('api',):          # keep authoritative api snapshots
-                history_json[date_str] = {'followers': count, 'source': 'api-reconstructed'}
-                changed = True
-            daily_total[date_str] = history_json[date_str]['followers'] if isinstance(history_json[date_str], dict) else history_json[date_str]
-
-        if changed:
-            HISTORY_PATH.write_text(json.dumps(history_json, indent=2, sort_keys=True))
-
-    # 4 — Compute net new from consecutive absolute diffs
     sorted_dates = sorted(daily_total)
     daily_net = {}
     for i in range(1, len(sorted_dates)):
@@ -262,67 +230,109 @@ def post_frequency(posts, months=12):
     return weekly_series, monthly_series
 
 
-# ── Live data fetch ───────────────────────────────────────────────────────────
+# ── Live data fetch via Instagram web API ────────────────────────────────────
+
+def _ig_session(env):
+    """Return a requests.Session with all Instagram auth cookies + headers."""
+    import requests as _req, urllib.parse as _up
+    s = _req.Session()
+    cookies = {
+        'sessionid':  _up.unquote(env.get('IG_SESSION_ID', '')),
+        'csrftoken':  env.get('IG_CSRF_TOKEN', ''),
+        'ds_user_id': env.get('IG_DS_USER_ID', ''),
+        'mid':        env.get('IG_MID', ''),
+        'ig_did':     env.get('IG_DID', ''),
+    }
+    for name, val in cookies.items():
+        if val:
+            s.cookies.set(name, val, domain='.instagram.com', path='/')
+    s.headers.update({
+        'User-Agent':       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+        'Accept':           '*/*',
+        'Accept-Language':  'de-DE,de;q=0.9,en;q=0.8',
+        'X-IG-App-ID':      '936619743392459',
+        'X-CSRFToken':      cookies['csrftoken'],
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer':          'https://www.instagram.com/',
+    })
+    return s
+
 
 def fetch_live(env):
-    ig_id     = env.get('IG_USER_ID')
-    ig_handle = env.get('IG_USERNAME', 'lamaisondeleoniie')
-
-    # Prefer the permanent page token; fall back to user token + dynamic page fetch
-    token = env.get('IG_PAGE_TOKEN') or env.get('IG_ACCESS_TOKEN')
-    if not token or not ig_id:
+    session_id = env.get('IG_SESSION_ID', '')
+    if not session_id:
+        print('  No IG_SESSION_ID in .env')
         return None
 
-    # If we only have a user token (no saved page token), fetch the page token dynamically
-    if not env.get('IG_PAGE_TOKEN'):
-        page_id = env.get('IG_PAGE_ID')
-        if page_id:
-            page_data = api_get(f'/{page_id}', token, params={'fields': 'access_token'})
-            if 'access_token' in page_data:
-                token = page_data['access_token']
-    print('  Using Page Access Token for insights.')
+    s = _ig_session(env)
 
     print('  Fetching account info…')
-    account = api_get(f'/{ig_id}', token, params={
-        'fields': 'name,username,biography,followers_count,follows_count,media_count,profile_picture_url'
-    })
-    if 'error' in account:
-        print(f'  Account fetch error: {account["error"].get("message")}')
+    try:
+        r = s.get('https://www.instagram.com/api/v1/users/web_profile_info/?username=lamaisondeleoniie', timeout=20)
+        r.raise_for_status()
+        udata = r.json()['data']['user']
+    except Exception as e:
+        print(f'  Account fetch failed: {e}')
         return None
 
-    since_30 = days_ago(30)
-    until    = now_ts()
+    user_id   = udata['id']
+    followers = udata['edge_followed_by']['count']
+    following = udata['edge_follow']['count']
+    bio       = udata.get('biography', '')
+    fullname  = udata.get('full_name', SITE_LABEL)
 
-    print('  Fetching 30-day reach / profile views / engagement…')
-    insights_by_metric = {}
-    for metric, extra in [
-        ('reach',            {}),
-        ('profile_views',    {'metric_type': 'total_value'}),
-        ('accounts_engaged', {'metric_type': 'total_value'}),
-    ]:
-        params = {'metric': metric, 'period': 'day', 'since': since_30, 'until': until}
-        params.update(extra)
-        raw = api_get(f'/{ig_id}/insights', token, params=params)
-        for item in raw.get('data', []):
-            name = item['name']
-            if 'total_value' in item:
-                tv  = item['total_value']
-                pts = [{'date': (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d'), 'value': tv.get('value', 0)}]
-            else:
-                pts = [{'date': v['end_time'][:10], 'value': v['value']} for v in item.get('values', [])]
-            insights_by_metric[name] = pts
+    # ── Fetch all posts via feed pagination ───────────────────────────────────
+    import time as _time
+    print('  Fetching all posts…')
+    all_items = []
+    next_max_id = None
+    page = 0
+    while True:
+        if page > 0:
+            _time.sleep(1.5)
+        params = 'count=50'
+        if next_max_id:
+            params += f'&max_id={next_max_id}'
+        try:
+            r = s.get(f'https://www.instagram.com/api/v1/feed/user/{user_id}/?{params}', timeout=20)
+            r.raise_for_status()
+            feed = r.json()
+        except Exception as e:
+            print(f'  Feed fetch error (page {page}): {e}')
+            break
+        batch = feed.get('items', [])
+        all_items.extend(batch)
+        page += 1
+        print(f'  Page {page}: {len(batch)} posts ({len(all_items)} total)')
+        if not feed.get('more_available') or not feed.get('next_max_id'):
+            break
+        next_max_id = feed['next_max_id']
 
-    print('  Fetching follower history + saving last 30 days…')
-    today_count = account.get('followers_count', 0)
-    daily_total, daily_net = fetch_follower_history(ig_id, token, today_count=today_count)
-    w_labels, w_total, w_net, m_labels, m_total, m_net = aggregate_follower_series(daily_total, daily_net)
+    print(f'  Got {len(all_items)} posts')
 
-    print('  Fetching all media…')
-    media_fields = 'id,caption,media_type,timestamp,like_count,comments_count,media_url,thumbnail_url,permalink,is_shared_to_feed'
-    media_list = paginate(f'/{ig_id}/media', token, params={'fields': media_fields}, limit=100, max_items=2000)
-    print(f'  Found {len(media_list)} posts total')
+    # media_type: 1=IMAGE, 2=VIDEO/REEL, 8=CAROUSEL_ALBUM
+    def _mtype(item):
+        mt = item.get('media_type', 1)
+        if mt == 8:
+            return 'CAROUSEL_ALBUM'
+        if mt == 2:
+            return 'REEL'
+        return 'IMAGE'
 
-    # Load cached insights (avoids re-fetching unchanged older posts)
+    def _thumb(item):
+        # For carousels, first resource's image; for video, thumbnail_url
+        if item.get('media_type') == 8:
+            resources = item.get('carousel_media', [])
+            src = resources[0] if resources else item
+        else:
+            src = item
+        cands = src.get('image_versions2', {}).get('candidates', [])
+        if cands:
+            # pick smallest for thumbnails (last in list)
+            return cands[-1].get('url', '')
+        return ''
+
+    # Load existing metrics cache (reach / saves / shares)
     cache = {}
     if POSTS_CACHE_PATH.exists():
         try:
@@ -330,64 +340,35 @@ def fetch_live(env):
         except Exception:
             cache = {}
 
-    # Decide fetch strategy:
-    # - First run (empty cache): fetch insights for up to 100 posts to seed the cache
-    # - Subsequent runs: only re-fetch posts from the last 30 days (fast)
-    SEED_LIMIT = 100
-    is_seed_run = len(cache) == 0
-    cutoff    = (datetime.now(timezone.utc) - timedelta(days=30)).strftime('%Y-%m-%d')
-    followers = account.get('followers_count', 1) or 1
-    fresh_count = cached_count = 0
     posts = []
-    for i, m in enumerate(media_list):
-        mid   = m['id']
-        _raw  = m.get('media_type', 'IMAGE')
-        mtype = 'REEL' if _raw == 'VIDEO' else _raw
-        post_date = m.get('timestamp', '')[:10]
-        likes    = m.get('like_count', 0) or 0
-        comments = m.get('comments_count', 0) or 0
-        saved = reach = views = shares = 0
-        post_follows = None
+    from datetime import datetime as _dt
+    for item in all_items:
+        mid      = str(item.get('pk', item.get('id', '')))
+        mtype    = _mtype(item)
+        likes    = item.get('like_count', 0) or 0
+        comments = item.get('comment_count', 0) or 0
+        views    = item.get('view_count') or item.get('play_count') or 0
+        taken_at = item.get('taken_at', 0)
+        post_date = _dt.utcfromtimestamp(taken_at).strftime('%Y-%m-%d') if taken_at else ''
+        cap_obj  = item.get('caption') or {}
+        caption  = (cap_obj.get('text', '') if isinstance(cap_obj, dict) else str(cap_obj))[:120]
+        code     = item.get('code', '')
 
-        needs_fetch = (post_date >= cutoff) or (is_seed_run and i < SEED_LIMIT)
+        c            = cache.get(mid, {})
+        saved        = c.get('saved', 0)
+        reach        = c.get('reach', 0)
+        shares       = c.get('shares', 0)
+        post_follows = c.get('follows')
 
-        if needs_fetch:
-            ins_data = api_get(f'/{mid}/insights', token, params={'metric': 'reach,saved,likes,comments,views,shares'})
-            ins      = {x['name']: x.get('values', [{}])[0].get('value', 0) for x in ins_data.get('data', [])}
-            likes    = ins.get('likes', likes)
-            comments = ins.get('comments', comments)
-            saved    = ins.get('saved', 0)
-            reach    = ins.get('reach', 0)
-            views    = ins.get('views', 0)
-            shares   = ins.get('shares', 0)
-            # follows metric only works on CAROUSEL_ALBUM and IMAGE — not Reels
-            if mtype != 'REEL':
-                fol_data = api_get(f'/{mid}/insights', token, params={'metric': 'follows'}, silent=True)
-                for item in fol_data.get('data', []):
-                    if item.get('name') == 'follows':
-                        v = item.get('values', [{}])[0].get('value')
-                        if v is not None:
-                            post_follows = v
-            cache[mid] = {'likes': likes, 'comments': comments, 'saved': saved,
-                          'reach': reach, 'views': views, 'follows': post_follows, 'shares': shares}
-            fresh_count += 1
-        elif mid in cache:
-            c        = cache[mid]
-            likes    = c.get('likes', likes)
-            comments = c.get('comments', comments)
-            saved    = c.get('saved', 0)
-            reach    = c.get('reach', 0)
-            views    = c.get('views', 0)
-            shares   = c.get('shares', 0)
-            post_follows = c.get('follows')
-            cached_count += 1
+        cache[mid] = {'likes': likes, 'comments': comments, 'saved': saved,
+                      'reach': reach, 'views': views, 'follows': post_follows, 'shares': shares}
 
-        eng_rate = round((likes + comments + saved) / followers * 100, 2)
+        eng_rate = round((likes + comments + saved) / max(followers, 1) * 100, 2)
         posts.append({
             'id':          mid,
             'type':        mtype,
             'date':        post_date,
-            'caption':     (m.get('caption') or '')[:120],
+            'caption':     caption,
             'likes':       likes,
             'comments':    comments,
             'saved':       saved,
@@ -397,81 +378,51 @@ def fetch_live(env):
             'eng_rate':    eng_rate,
             'followers':   post_follows,
             'shares':      shares,
-            'thumbnail':   m.get('thumbnail_url') or m.get('media_url') or '',
-            'permalink':   m.get('permalink', ''),
+            'thumbnail':   _thumb(item),
+            'permalink':   f'https://www.instagram.com/p/{code}/' if code else '',
         })
 
-    # Persist cache for next run
     POSTS_CACHE_PATH.write_text(json.dumps(cache))
-    print(f'  Insights: {fresh_count} fresh, {cached_count} from cache')
 
-    # ── Stories ───────────────────────────────────────────────────────────────
-    print('  Fetching stories…')
+    # Stories — use existing cache
     stories_cache = {}
     if STORIES_CACHE_PATH.exists():
         try:
             stories_cache = json.loads(STORIES_CACHE_PATH.read_text())
         except Exception:
             stories_cache = {}
-
-    story_fields = 'id,media_type,timestamp,media_url,thumbnail_url'
-    active_stories = paginate(f'/{ig_id}/stories', token, params={'fields': story_fields}, limit=100, max_items=500)
-    new_stories = 0
-    for s in active_stories:
-        sid  = s['id']
-        ins  = api_get(f'/{sid}/insights', token, params={'metric': 'reach,replies,link_clicks'}, silent=True)
-        imap = {x['name']: x.get('values', [{}])[0].get('value', 0) for x in ins.get('data', [])}
-        stories_cache[sid] = {
-            'id':          sid,
-            'date':        s.get('timestamp', '')[:10],
-            'type':        'VIDEO' if s.get('media_type') == 'VIDEO' else 'IMAGE',
-            'thumbnail':   s.get('thumbnail_url') or s.get('media_url') or '',
-            'reach':       imap.get('reach', stories_cache.get(sid, {}).get('reach', 0)),
-            'replies':     imap.get('replies', stories_cache.get(sid, {}).get('replies', 0)),
-            'link_clicks': imap.get('link_clicks', stories_cache.get(sid, {}).get('link_clicks', 0)),
-            'views':       stories_cache.get(sid, {}).get('views'),
-        }
-        new_stories += 1
-
-    STORIES_CACHE_PATH.write_text(json.dumps(stories_cache))
     stories = sorted(stories_cache.values(), key=lambda x: x.get('date') or '', reverse=True)
-    print(f'  Stories: {new_stories} active, {len(stories)} total in cache')
+    print(f'  Stories: {len(stories)} in cache')
 
-    reach_ts      = insights_by_metric.get('reach', [])
-    profile_views = insights_by_metric.get('profile_views', [])
-    engaged_ts    = insights_by_metric.get('accounts_engaged', [])
+    print('  Updating follower history…')
+    daily_total, daily_net = fetch_follower_history(today_count=followers)
+    w_labels, w_total, w_net, m_labels, m_total, m_net = aggregate_follower_series(daily_total, daily_net)
 
-    follower_now  = account.get('followers_count', 0)
-    # Net gain over last 30 days from daily_net
     follower_gain = sum(v for k, v in daily_net.items()
                         if k >= (datetime.now(timezone.utc) - timedelta(days=30)).strftime('%Y-%m-%d'))
-
-    total_reach_30d = sum(p['value'] for p in reach_ts)
     avg_eng = round(sum(p['eng_rate'] for p in posts[:20]) / max(len(posts[:20]), 1), 2) if posts else 0
-
     weekly_freq, monthly_freq = post_frequency(posts)
 
     return {
-        'generated':     datetime.now().strftime('%-d %b %Y %H:%M'),
-        'handle':        ig_handle,
-        'name':          account.get('name', SITE_LABEL),
-        'biography':     account.get('biography', ''),
-        'followers':     follower_now,
-        'following':     account.get('follows_count', 0),
-        'media_count':   account.get('media_count', 0),
+        'generated':        datetime.now().strftime('%-d %b %Y %H:%M'),
+        'handle':           'lamaisondeleoniie',
+        'name':             fullname,
+        'biography':        bio,
+        'followers':        followers,
+        'following':        following,
+        'media_count':      len(posts),
         'follower_gain_30d': follower_gain,
-        'reach_30d':     total_reach_30d,
-        'avg_eng_rate':  avg_eng,
-        'reach_ts':      reach_ts,
-        'profile_views_ts': profile_views,
-        # 12-month follower series
+        'reach_30d':        0,
+        'avg_eng_rate':     avg_eng,
+        'reach_ts':         [],
+        'profile_views_ts': [],
         'w_labels': w_labels, 'w_total': w_total, 'w_net': w_net,
         'm_labels': m_labels, 'm_total': m_total, 'm_net': m_net,
-        'posts':    posts,
-        'stories':  stories,
-        'weekly_freq':  weekly_freq,
-        'monthly_freq': monthly_freq,
-        'is_mock':  False,
+        'posts':            posts,
+        'stories':          stories,
+        'weekly_freq':      weekly_freq,
+        'monthly_freq':     monthly_freq,
+        'is_mock':          False,
     }
 
 
@@ -1573,8 +1524,8 @@ def main():
     print('Instagram Dashboard Generator')
     print('─' * 40)
 
-    if env.get('IG_PAGE_TOKEN') or env.get('IG_ACCESS_TOKEN'):
-        print('  Token found — fetching live data…')
+    if env.get('IG_SESSION_ID'):
+        print('  Session found — fetching live data…')
         data = fetch_live(env)
         if data is None:
             print('  Live fetch failed — falling back to mock data.')

@@ -17,27 +17,29 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
+      - name: Install dependencies
+        run: pip install requests
+
       - name: Generate dashboard
         env:
-          IG_PAGE_TOKEN:      ${{ secrets.IG_PAGE_TOKEN }}
-          IG_USER_ID:         ${{ secrets.IG_USER_ID }}
+          IG_SESSION_ID:      ${{ secrets.IG_SESSION_ID }}
+          IG_CSRF_TOKEN:      ${{ secrets.IG_CSRF_TOKEN }}
+          IG_DS_USER_ID:      ${{ secrets.IG_DS_USER_ID }}
+          IG_MID:             ${{ secrets.IG_MID }}
+          IG_DID:             ${{ secrets.IG_DID }}
           DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
           OUTPUT_FILE:        index.html
         run: python3 generate.py
 
-      - name: Upload to Pages
-        uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v3
         with:
           path: '.'
 
-      - name: Deploy
-        id: deployment
+      - id: deployment
         uses: actions/deploy-pages@v4
