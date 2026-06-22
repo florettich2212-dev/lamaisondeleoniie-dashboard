@@ -994,14 +994,21 @@ function showPage(id, btn) {{
 const SYNC_ICON = '<svg class="sync-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>';
 let _syncPoller = null;
 
+const IS_LIVE = location.hostname !== 'localhost' && location.hostname !== '127.0.0.1';
+
 async function doSync() {{
   const btn = document.getElementById('syncBtn');
+  if (IS_LIVE) {{
+    btn.className = 'sync-btn error';
+    btn.textContent = '↻ Updates every hour';
+    setTimeout(() => {{ btn.className='sync-btn'; btn.innerHTML=SYNC_ICON+' Sync'; }}, 3000);
+    return;
+  }}
   btn.className = 'sync-btn syncing';
   btn.innerHTML = SYNC_ICON + ' Syncing…';
   try {{
     const r = await fetch('/sync', {{method:'POST'}});
     if (!r.ok) throw new Error('server error');
-    // Kick off polling — generate.py takes ~2 min, check every 4s
     if (_syncPoller) clearInterval(_syncPoller);
     _syncPoller = setInterval(async () => {{
       try {{
