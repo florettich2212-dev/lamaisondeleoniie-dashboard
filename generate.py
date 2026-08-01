@@ -1793,7 +1793,15 @@ def main():
     print('Instagram Dashboard Generator')
     print('─' * 40)
 
-    if env.get('IG_SESSION_ID'):
+    # Instagram hard-blocks datacenter IPs, so a CI run can never fetch — every
+    # attempt just adds to the account's rate-limit pressure and slows the
+    # deploy. Fresh data reaches CI by being committed (see refresh.sh).
+    in_ci = os.environ.get('GITHUB_ACTIONS') == 'true'
+
+    if in_ci and FULL_POSTS_CACHE_PATH.exists():
+        print('  CI run — rendering from committed cache (no live fetch)')
+        data = build_from_cache()
+    elif env.get('IG_SESSION_ID'):
         print('  Session found — fetching live data…')
         data = fetch_live(env)
         if data is None:
