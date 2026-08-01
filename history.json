@@ -1388,99 +1388,99 @@
     "source": "api-reconstructed"
   },
   "2026-05-01": {
-    "followers": 75729,
+    "followers": 75678,
     "source": "api-reconstructed"
   },
   "2026-05-02": {
-    "followers": 75786,
+    "followers": 75735,
     "source": "api-reconstructed"
   },
   "2026-05-03": {
-    "followers": 75847,
+    "followers": 75677,
     "source": "api-reconstructed"
   },
   "2026-05-04": {
-    "followers": 75914,
+    "followers": 75744,
     "source": "api-reconstructed"
   },
   "2026-05-05": {
-    "followers": 75961,
+    "followers": 75791,
     "source": "api-reconstructed"
   },
   "2026-05-06": {
-    "followers": 76003,
+    "followers": 75833,
     "source": "api-reconstructed"
   },
   "2026-05-07": {
-    "followers": 76086,
+    "followers": 75916,
     "source": "api-reconstructed"
   },
   "2026-05-08": {
-    "followers": 76154,
+    "followers": 75984,
     "source": "api-reconstructed"
   },
   "2026-05-09": {
-    "followers": 76208,
+    "followers": 76038,
     "source": "api-reconstructed"
   },
   "2026-05-10": {
-    "followers": 76272,
+    "followers": 76102,
     "source": "api-reconstructed"
   },
   "2026-05-11": {
-    "followers": 76329,
+    "followers": 76159,
     "source": "api-reconstructed"
   },
   "2026-05-12": {
-    "followers": 76386,
+    "followers": 76216,
     "source": "api-reconstructed"
   },
   "2026-05-13": {
-    "followers": 76466,
+    "followers": 76296,
     "source": "api-reconstructed"
   },
   "2026-05-14": {
-    "followers": 76582,
+    "followers": 76412,
     "source": "api-reconstructed"
   },
   "2026-05-15": {
-    "followers": 76719,
+    "followers": 76549,
     "source": "api-reconstructed"
   },
   "2026-05-16": {
-    "followers": 76888,
+    "followers": 76718,
     "source": "api-reconstructed"
   },
   "2026-05-17": {
-    "followers": 77061,
+    "followers": 76891,
     "source": "api-reconstructed"
   },
   "2026-05-18": {
-    "followers": 77205,
+    "followers": 77035,
     "source": "api-reconstructed"
   },
   "2026-05-19": {
-    "followers": 77322,
+    "followers": 77152,
     "source": "api-reconstructed"
   },
   "2026-05-20": {
-    "followers": 77401,
+    "followers": 77231,
     "source": "api-reconstructed"
   },
   "2026-05-21": {
-    "followers": 77471,
+    "followers": 77301,
     "source": "api-reconstructed"
   },
   "2026-05-22": {
-    "followers": 77533,
+    "followers": 77363,
     "source": "api-reconstructed"
   },
   "2026-05-23": {
-    "followers": 77601,
+    "followers": 77431,
     "source": "api-reconstructed"
   },
   "2026-05-24": {
-    "followers": 77675,
+    "followers": 77505,
     "source": "api-reconstructed"
   },
   "2026-05-25": {
@@ -1490,15 +1490,15 @@
     "source": "api"
   },
   "2026-05-26": {
-    "followers": 77824,
+    "followers": 77654,
     "source": "api-reconstructed"
   },
   "2026-05-27": {
-    "followers": 77896,
+    "followers": 77726,
     "source": "api-reconstructed"
   },
   "2026-05-28": {
-    "followers": 77951,
+    "followers": 77781,
     "source": "api-reconstructed"
   },
   "2026-05-29": {
@@ -1508,7 +1508,31 @@
     "source": "api"
   },
   "2026-05-30": {
-    "followers": 78008,
+    "followers": 77892,
     "source": "api-reconstructed"
+  },
+  "2026-05-31": {
+    "followers": 77943,
+    "source": "api-reconstructed"
+  },
+  "2026-06-01": {
+    "followers": 78001,
+    "source": "api-reconstructed"
+  },
+  "2026-06-02": {
+    "followers": 78001,
+    "source": "api-reconstructed"
+  },
+  "2026-06-22": {
+    "followers": 78328,
+    "source": "instagrapi"
+  },
+  "2026-07-06": {
+    "followers": 78692,
+    "source": "instagrapi"
+  },
+  "2026-08-01": {
+    "followers": 81277,
+    "source": "instagrapi"
   }
 }

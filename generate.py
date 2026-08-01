@@ -22,6 +22,8 @@ POSTS_CACHE_PATH  = Path(__file__).parent / 'posts_cache.json'
 STORIES_CACHE_PATH = Path(__file__).parent / 'stories_cache.json'
 OUTPUT_PATH     = Path(os.environ.get('OUTPUT_FILE', str(Path(__file__).parent / 'dashboard.html')))
 API_VERSION = 'v22.0'
+FEED_RETRIES = 4     # attempts per feed page before giving up
+FEED_BACKOFF = 20    # seconds, doubled on each retry
 IG_HANDLE   = '@lamaisondeleoniie'
 SITE_LABEL  = 'lamaisondeleoniie'
 
@@ -258,6 +260,41 @@ def _ig_session(env):
     return s
 
 
+def _items_from_profile(udata):
+    """Convert the newest posts embedded in web_profile_info to feed-item shape.
+
+    The feed endpoint is throttled far more aggressively than the profile
+    endpoint, so this keeps recent posts flowing even when pagination 401s.
+    Returns the same dict shape the feed returns, so the caller's post-building
+    loop works unchanged.
+    """
+    edges = (udata.get('edge_owner_to_timeline_media') or {}).get('edges') or []
+    type_map = {'GraphSidecar': 8, 'GraphVideo': 2, 'GraphImage': 1}
+    items = []
+    for edge in edges:
+        n = edge.get('node') or {}
+        mt = type_map.get(n.get('__typename'), 1)
+        caption_edges = (n.get('edge_media_to_caption') or {}).get('edges') or []
+        caption = caption_edges[0]['node']['text'] if caption_edges else ''
+        thumb = n.get('display_url') or n.get('thumbnail_src') or ''
+        images = {'candidates': [{'url': thumb}]} if thumb else {}
+        item = {
+            'pk':            n.get('id', ''),
+            'code':          n.get('shortcode', ''),
+            'media_type':    mt,
+            'like_count':    (n.get('edge_liked_by') or {}).get('count', 0),
+            'comment_count': (n.get('edge_media_to_comment') or {}).get('count', 0),
+            'view_count':    n.get('video_view_count') or 0,
+            'taken_at':      n.get('taken_at_timestamp', 0),
+            'caption':       {'text': caption},
+            'image_versions2': images,
+        }
+        if mt == 8:
+            item['carousel_media'] = [{'image_versions2': images}]
+        items.append(item)
+    return items
+
+
 def fetch_live(env):
     session_id = env.get('IG_SESSION_ID', '')
     if not session_id:
@@ -293,12 +330,26 @@ def fetch_live(env):
         params = 'count=50'
         if next_max_id:
             params += f'&max_id={next_max_id}'
-        try:
-            r = s.get(f'https://www.instagram.com/api/v1/feed/user/{user_id}/?{params}', timeout=20)
-            r.raise_for_status()
-            feed = r.json()
-        except Exception as e:
-            print(f'  Feed fetch error (page {page}): {e}')
+        # Instagram throttles this endpoint hard — retry a 401/429 with backoff
+        # before giving up, otherwise a single blip costs the whole fetch.
+        feed = None
+        for attempt in range(FEED_RETRIES):
+            try:
+                r = s.get(f'https://www.instagram.com/api/v1/feed/user/{user_id}/?{params}', timeout=20)
+                r.raise_for_status()
+                feed = r.json()
+                break
+            except Exception as e:
+                status = getattr(getattr(e, 'response', None), 'status_code', None)
+                last = attempt == FEED_RETRIES - 1
+                if status in (401, 429) and not last:
+                    wait = FEED_BACKOFF * (2 ** attempt)
+                    print(f'  Feed {status} (page {page}, try {attempt + 1}) — retrying in {wait}s')
+                    _time.sleep(wait)
+                    continue
+                print(f'  Feed fetch error (page {page}): {e}')
+                break
+        if feed is None:
             break
         batch = feed.get('items', [])
         all_items.extend(batch)
@@ -309,6 +360,9 @@ def fetch_live(env):
         next_max_id = feed['next_max_id']
 
     print(f'  Got {len(all_items)} posts')
+    if not all_items:
+        all_items = _items_from_profile(udata)
+        print(f'  Feed unavailable — using {len(all_items)} recent posts from profile payload')
     if not all_items:
         print('  No posts fetched — falling back to cache.')
         return None
@@ -387,6 +441,11 @@ def fetch_live(env):
 
     POSTS_CACHE_PATH.write_text(json.dumps(cache))
 
+    # Merge into the full posts cache — the feed only returns the newest pages
+    # (and pagination often 401s mid-way), so never let a partial fetch shrink
+    # the dataset the cache-only build renders from.
+    posts = _refresh_thumbnails(merge_into_full_cache(posts, followers))
+
     # Stories — use existing cache
     stories_cache = {}
     if STORIES_CACHE_PATH.exists():
@@ -432,6 +491,50 @@ def fetch_live(env):
 # ── Mock data ─────────────────────────────────────────────────────────────────
 
 FULL_POSTS_CACHE_PATH = Path(__file__).parent / 'full_posts_cache.json'
+
+
+def merge_into_full_cache(fresh, followers=0):
+    """Merge freshly fetched posts into full_posts_cache.json and return the union.
+
+    Live and cached posts use different id namespaces (web-API `pk` vs Graph
+    media id), so posts are matched by permalink. Fresh values win for the
+    metrics the feed returns; insights the feed never returns (saved, reach,
+    shares, follows) are kept from the cache when the fresh post has none.
+    """
+    existing = []
+    if FULL_POSTS_CACHE_PATH.exists():
+        try:
+            existing = json.loads(FULL_POSTS_CACHE_PATH.read_text())
+        except Exception:
+            existing = []
+
+    def key(p):
+        return p.get('permalink') or p.get('id')
+
+    merged = {key(p): p for p in existing if key(p)}
+    for p in fresh:
+        k = key(p)
+        if not k:
+            continue
+        old = merged.get(k)
+        if old:
+            for field in ('saved', 'reach', 'shares', 'followers'):
+                if not p.get(field) and old.get(field):
+                    p[field] = old[field]
+            if followers:
+                p['eng_rate'] = round(
+                    (p.get('likes', 0) + p.get('comments', 0) + (p.get('saved') or 0))
+                    / followers * 100, 2)
+            if not p.get('thumbnail'):
+                p['thumbnail'] = old.get('thumbnail', '')
+            p['id'] = old.get('id', p['id'])
+        merged[k] = p
+
+    posts = sorted(merged.values(), key=lambda p: p.get('date') or '', reverse=True)
+    if len(posts) >= len(existing):
+        FULL_POSTS_CACHE_PATH.write_text(json.dumps(posts))
+        print(f'  Full cache: {len(existing)} → {len(posts)} posts')
+    return posts
 
 
 def _refresh_thumbnails(posts):
