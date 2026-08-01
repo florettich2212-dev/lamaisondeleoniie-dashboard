@@ -22,8 +22,10 @@ POSTS_CACHE_PATH  = Path(__file__).parent / 'posts_cache.json'
 STORIES_CACHE_PATH = Path(__file__).parent / 'stories_cache.json'
 OUTPUT_PATH     = Path(os.environ.get('OUTPUT_FILE', str(Path(__file__).parent / 'dashboard.html')))
 API_VERSION = 'v22.0'
-FEED_RETRIES = 4     # attempts per feed page before giving up
-FEED_BACKOFF = 20    # seconds, doubled on each retry
+FEED_RETRIES = 4      # attempts per feed page before giving up
+FEED_BACKOFF = 20     # seconds, doubled on each retry
+FEED_PAGE_DELAY = 8   # seconds between pages; below ~5s Instagram starts 401ing
+FEED_MAX_PAGES = 25   # ~12 posts per page, so this covers the full back catalogue
 IG_HANDLE   = '@lamaisondeleoniie'
 SITE_LABEL  = 'lamaisondeleoniie'
 
@@ -324,9 +326,18 @@ def fetch_live(env):
     all_items = []
     next_max_id = None
     page = 0
+    # Permalinks already on disk — once a page adds nothing new we've caught up
+    # with the cache and can stop instead of re-walking the whole back catalogue.
+    known = set()
+    if FULL_POSTS_CACHE_PATH.exists():
+        try:
+            known = {p.get('permalink') for p in json.loads(FULL_POSTS_CACHE_PATH.read_text())}
+        except Exception:
+            known = set()
+    stale_pages = 0
     while True:
         if page > 0:
-            _time.sleep(1.5)
+            _time.sleep(FEED_PAGE_DELAY)
         params = 'count=50'
         if next_max_id:
             params += f'&max_id={next_max_id}'
@@ -354,7 +365,18 @@ def fetch_live(env):
         batch = feed.get('items', [])
         all_items.extend(batch)
         page += 1
-        print(f'  Page {page}: {len(batch)} posts ({len(all_items)} total)')
+        new = sum(1 for it in batch
+                  if f"https://www.instagram.com/p/{it.get('code', '')}/" not in known)
+        print(f'  Page {page}: {len(batch)} posts, {new} new ({len(all_items)} total)')
+        # Pinned posts sit at the top and are usually already known, so only
+        # stop after two consecutive pages that add nothing.
+        stale_pages = stale_pages + 1 if new == 0 else 0
+        if known and stale_pages >= 2:
+            print('  Caught up with cache — stopping pagination')
+            break
+        if page >= FEED_MAX_PAGES:
+            print(f'  Reached page limit ({FEED_MAX_PAGES}) — stopping')
+            break
         if not feed.get('more_available') or not feed.get('next_max_id'):
             break
         next_max_id = feed['next_max_id']
